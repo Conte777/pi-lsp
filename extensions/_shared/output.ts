@@ -1,48 +1,10 @@
 import path from "node:path";
 import type { Diagnostic, DiagnosticRelatedInformation } from "vscode-languageserver-protocol";
-import type { CommandRunResult } from "./types";
 import { uriToFilePath } from "./paths";
-
-const DEFAULT_OUTPUT_LIMIT = 4000;
-
-export function textFromContent(content: Array<{ type: string; text?: string }>): string {
-  return content
-    .filter((item): item is { type: "text"; text: string } => item.type === "text" && typeof item.text === "string")
-    .map((item) => item.text)
-    .join("\n");
-}
-
-export function appendTextContent<T extends Array<{ type: string; text?: string }>>(content: T, text: string): T {
-  if (!text.trim()) return content;
-  return [...content, { type: "text", text }] as T;
-}
-
-export function truncateOutput(output: string, limit = DEFAULT_OUTPUT_LIMIT): string {
-  const normalized = output.trim();
-  if (normalized.length <= limit) return normalized;
-  return `${normalized.slice(0, limit)}\n… output truncated (${normalized.length - limit} more characters)`;
-}
-
-export function commandOutput(result: Pick<CommandRunResult, "stdout" | "stderr">): string {
-  return truncateOutput([result.stdout, result.stderr].filter((part) => part.trim().length > 0).join("\n"));
-}
 
 export function formatWarnings(title: string, warnings: string[]): string {
   if (warnings.length === 0) return "";
   return `${title}:\n\n${warnings.map((warning) => `⚠️ ${warning}`).join("\n")}`;
-}
-
-export function formatCommandIssue(toolId: string, action: string, result: CommandRunResult): string {
-  const output = commandOutput(result);
-  const suffix = result.killed ? " (killed/timeout)" : "";
-  if (!output) return `⚠️ ${toolId} ${action} failed with exit code ${result.code}${suffix}`;
-  return `⚠️ ${toolId} ${action} failed with exit code ${result.code}${suffix}:\n${output}`;
-}
-
-export function formatDiagnosticOutput(toolId: string, output: string): string {
-  const compact = truncateOutput(output);
-  if (!compact) return `⚠️ ${toolId} found issues`;
-  return `⚠️ ${toolId} found issues:\n${compact}`;
 }
 
 function severityLabel(severity: number | undefined): string {

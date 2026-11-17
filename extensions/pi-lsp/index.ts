@@ -27,7 +27,7 @@ import { isPathIncluded, matchesAnyGlob } from "../_shared/glob";
 import { filePathToUri, findProjectRoot, normalizeRelativePath, resolveCommand, toAbsolutePath, uriToFilePath } from "../_shared/paths";
 import { formatLspDiagnostics, formatWarnings, hasIssueOutput, joinSections } from "../_shared/output";
 import { isExecutableAvailable } from "../_shared/runner";
-import type { LspServerConfig, ResolvedCommand, StoredDiagnostics } from "../_shared/types";
+import type { LspServerConfig, StoredDiagnostics } from "../_shared/types";
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 45_000;
 const DEFAULT_DIAGNOSTICS_WAIT_MS = 1_500;
@@ -38,8 +38,12 @@ const SHUTDOWN_WRITE_TIMEOUT_MS = 100;
 interface MatchedServer {
   server: LspServerConfig;
   root: string;
-  relFile: string;
 }
+
+type NavigationRequest =
+  | { kind: "hover" | "definition"; line: number; character: number }
+  | { kind: "references"; line: number; character: number; includeDeclaration: boolean }
+  | { kind: "symbols" };
 
 interface OpenDocument {
   file: string;
@@ -169,32 +173,6 @@ function registerDiagnosticsRenderer(pi: ExtensionAPI): void {
   });
 }
 
-class DocumentStore {
-  private readonly documents = new Map<string, OpenDocument>();
-
-  get(file: string): OpenDocument | undefined {
-    return this.documents.get(file);
-  }
-
-  open(file: string, languageId: string, text: string): OpenDocument {
-    const doc: OpenDocument = { file, uri: filePathToUri(file), languageId, version: 1, text };
-    this.documents.set(file, doc);
-    return doc;
-  }
-
-  change(file: string, text: string): OpenDocument {
-    const existing = this.documents.get(file);
-    if (!existing) throw new Error(`document not opened: ${file}`);
-    const updated: OpenDocument = { ...existing, version: existing.version + 1, text };
-    this.documents.set(file, updated);
-    return updated;
-  }
-
-  values(): OpenDocument[] {
-    return [...this.documents.values()];
-  }
-}
-
 class DiagnosticsStore {
   private readonly diagnostics = new Map<string, StoredDiagnostics>();
 
@@ -223,6 +201,12 @@ class DiagnosticsStore {
     return this.diagnostics.get(this.key(serverId, root, file));
   }
 
+  clear(serverId: string, root: string): void {
+    for (const [key, entry] of this.diagnostics) {
+      if (entry.serverId === serverId && entry.root === root) this.diagnostics.delete(key);
+    }
+  }
+
   getAllForFile(file: string): StoredDiagnostics[] {
     return [...this.diagnostics.values()].filter((entry) => entry.file === file);
   }
@@ -232,41 +216,48 @@ class LspClient {
   private process: ChildProcessWithoutNullStreams | undefined;
   private connection: MessageConnection | undefined;
   private capabilities: ServerCapabilities | undefined;
-  private readonly documents = new DocumentStore();
+  private readonly documents = new Map<string, OpenDocument>();
   private startPromise: Promise<void> | undefined;
-  private unavailableReason: string | undefined;
+  private failure: { retryAt: number; attempts: number; reason: string } | undefined;
+  private stopped = false;
   private stderrTail = "";
 
   constructor(
-    private readonly server: LspServerConfig,
+    private server: LspServerConfig,
     private readonly root: string,
-    private readonly command: ResolvedCommand,
     private readonly diagnostics: DiagnosticsStore,
   ) {}
 
-  get isUnavailable(): boolean {
-    return !!this.unavailableReason;
-  }
-
-  get reason(): string | undefined {
-    return this.unavailableReason;
-  }
-
-  async ensureStarted(signal?: AbortSignal): Promise<void> {
-    if (this.unavailableReason) throw new Error(this.unavailableReason);
-    this.startPromise ??= this.start(signal);
+  private async ensureStarted(server: LspServerConfig, workspace: string, file: string, signal?: AbortSignal): Promise<void> {
+    if (this.stopped) throw new Error(`${this.server.id}: LSP client stopped`);
+    if (this.failure && Date.now() < this.failure.retryAt) {
+      throw new Error(`${this.server.id}: unavailable (${this.failure.reason}); retry after ${new Date(this.failure.retryAt).toISOString()}`);
+    }
+    this.startPromise ??= this.start(server, workspace, file, signal).then(() => {
+      this.failure = undefined;
+    }).catch(async (error: Error) => {
+      const attempts = (this.failure?.attempts ?? 0) + 1;
+      const reason = [error.message, this.stderrTail.trim()].filter(Boolean).join(": ");
+      await this.stopProcess();
+      const delayMs = Math.min(60_000, 1_000 * 2 ** Math.min(attempts, 6));
+      this.failure = { attempts, retryAt: Date.now() + delayMs, reason };
+      this.startPromise = undefined;
+      throw new Error(reason);
+    });
     await this.startPromise;
   }
 
-  private async start(signal?: AbortSignal): Promise<void> {
-    if (!isExecutableAvailable(this.command.bin)) {
-      this.unavailableReason = `${this.server.id}: LSP binary not found: ${this.command.bin}`;
-      throw new Error(this.unavailableReason);
+  private async start(server: LspServerConfig, workspace: string, file: string, signal?: AbortSignal): Promise<void> {
+    this.server = server;
+    this.stderrTail = "";
+    const command = resolveCommand(server.id, server, { workspace, root: this.root, file });
+    if (!isExecutableAvailable(command.bin)) {
+      throw new Error(`${server.id}: LSP binary not found: ${command.bin}`);
     }
 
-    const child = spawn(this.command.bin, this.command.args, {
-      cwd: this.command.cwd,
-      env: this.command.env ? { ...process.env, ...this.command.env } : process.env,
+    const child = spawn(command.bin, command.args, {
+      cwd: command.cwd,
+      env: command.env ? { ...process.env, ...command.env } : process.env,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -275,14 +266,22 @@ class LspClient {
     child.stderr.on("data", (chunk: Buffer) => {
       this.stderrTail = `${this.stderrTail}${chunk.toString()}`.slice(-4000);
     });
-    child.on("exit", (code, sig) => {
-      this.unavailableReason = `${this.server.id}: LSP exited (${code ?? sig ?? "unknown"})${this.stderrTail ? `: ${this.stderrTail.trim()}` : ""}`;
-      this.connection?.dispose();
-      this.connection = undefined;
-    });
-
     const connection = createMessageConnection(new StreamMessageReader(child.stdout), new StreamMessageWriter(child.stdin));
     this.connection = connection;
+    child.on("error", (error) => {
+      this.stderrTail = `${this.stderrTail}${error.message}`.slice(-4000);
+      connection.dispose();
+    });
+    child.on("exit", () => {
+      connection.dispose();
+      if (this.process !== child) return;
+      this.process = undefined;
+      this.connection = undefined;
+      this.startPromise = undefined;
+      this.documents.clear();
+      this.diagnostics.clear(this.server.id, this.root);
+    });
+
     this.registerHandlers(connection);
     connection.listen();
 
@@ -360,13 +359,13 @@ class LspClient {
     anyConnection.onNotification("telemetry/event", () => undefined);
   }
 
-  async openOrChange(file: string, languageId: string, text: string, signal?: AbortSignal): Promise<OpenDocument> {
-    await this.ensureStarted(signal);
+  private async openOrChange(file: string, languageId: string, text: string): Promise<OpenDocument> {
     if (!this.connection) throw new Error(`${this.server.id}: LSP connection unavailable`);
 
     const existing = this.documents.get(file);
     if (!existing) {
-      const doc = this.documents.open(file, languageId, text);
+      const doc: OpenDocument = { file, uri: filePathToUri(file), languageId, version: 1, text };
+      this.documents.set(file, doc);
       await this.connection.sendNotification(DidOpenTextDocumentNotification.method, {
         textDocument: {
           uri: doc.uri,
@@ -378,7 +377,8 @@ class LspClient {
       return doc;
     }
 
-    const doc = this.documents.change(file, text);
+    const doc = { ...existing, version: existing.version + 1, text };
+    this.documents.set(file, doc);
     await this.connection.sendNotification(DidChangeTextDocumentNotification.method, {
       textDocument: { uri: doc.uri, version: doc.version },
       contentChanges: [{ text: doc.text }],
@@ -386,7 +386,7 @@ class LspClient {
     return doc;
   }
 
-  async didSave(file: string): Promise<void> {
+  private async didSave(file: string): Promise<void> {
     if (!this.connection || !supportsSave(this.capabilities)) return;
     const doc = this.documents.get(file);
     if (!doc) return;
@@ -396,7 +396,7 @@ class LspClient {
     });
   }
 
-  async hover(file: string, line: number, character: number): Promise<unknown> {
+  private async hover(file: string, line: number, character: number): Promise<unknown> {
     if (!this.connection) throw new Error(`${this.server.id}: LSP connection unavailable`);
     return withTimeout(
       this.connection.sendRequest(HoverRequest.method, {
@@ -408,7 +408,7 @@ class LspClient {
     );
   }
 
-  async definition(file: string, line: number, character: number): Promise<unknown> {
+  private async definition(file: string, line: number, character: number): Promise<unknown> {
     if (!this.connection) throw new Error(`${this.server.id}: LSP connection unavailable`);
     return withTimeout(
       this.connection.sendRequest(DefinitionRequest.method, {
@@ -420,7 +420,7 @@ class LspClient {
     );
   }
 
-  async references(file: string, line: number, character: number, includeDeclaration: boolean): Promise<unknown> {
+  private async references(file: string, line: number, character: number, includeDeclaration: boolean): Promise<unknown> {
     if (!this.connection) throw new Error(`${this.server.id}: LSP connection unavailable`);
     return withTimeout(
       this.connection.sendRequest(ReferencesRequest.method, {
@@ -433,7 +433,7 @@ class LspClient {
     );
   }
 
-  async symbols(file: string): Promise<unknown> {
+  private async symbols(file: string): Promise<unknown> {
     if (!this.connection) throw new Error(`${this.server.id}: LSP connection unavailable`);
     return withTimeout(
       this.connection.sendRequest(DocumentSymbolRequest.method, {
@@ -444,11 +444,46 @@ class LspClient {
     );
   }
 
+  private async prepareDocument(file: string, server: LspServerConfig, workspace: string, signal?: AbortSignal): Promise<void> {
+    const limit = server.maxFileSizeBytes ?? DEFAULT_MAX_FILE_SIZE_BYTES;
+    if (!(await fileSizeAllowed(file, limit))) {
+      throw new Error(`skipped ${normalizeRelativePath(path.relative(this.root, file))}; file exceeds maxFileSizeBytes (${limit})`);
+    }
+    const text = await readTextFile(file);
+    await this.ensureStarted(server, workspace, file, signal);
+    await this.openOrChange(file, languageIdForFile(server, file), text);
+  }
+
+  async updateDiagnostics(file: string, server: LspServerConfig, workspace: string, signal?: AbortSignal): Promise<string> {
+    await this.prepareDocument(file, server, workspace, signal);
+    await this.didSave(file);
+    await delay(server.diagnosticsWaitMs ?? DEFAULT_DIAGNOSTICS_WAIT_MS, signal);
+    const entry = this.diagnostics.get(this.server.id, this.root, file);
+    return formatLspDiagnostics(this.server.id, file, entry?.diagnostics ?? [], this.root);
+  }
+
+  async navigate(file: string, server: LspServerConfig, workspace: string, request: NavigationRequest, signal?: AbortSignal): Promise<unknown> {
+    await this.prepareDocument(file, server, workspace, signal);
+    switch (request.kind) {
+      case "hover": return this.hover(file, request.line, request.character);
+      case "definition": return this.definition(file, request.line, request.character);
+      case "references": return this.references(file, request.line, request.character, request.includeDeclaration);
+      case "symbols": return this.symbols(file);
+    }
+  }
+
   async shutdown(): Promise<void> {
+    this.stopped = true;
+    await this.stopProcess();
+  }
+
+  private async stopProcess(): Promise<void> {
     const connection = this.connection;
     const child = this.process;
     this.connection = undefined;
     this.process = undefined;
+    this.documents.clear();
+    this.diagnostics.clear(this.server.id, this.root);
 
     if (child) {
       await bestEffortWriteJsonRpc(child, { jsonrpc: "2.0", id: "pi-lsp-shutdown", method: "shutdown" });
@@ -469,7 +504,6 @@ class LspClient {
 class LspManager {
   private readonly diagnostics = new DiagnosticsStore();
   private readonly clients = new Map<string, LspClient>();
-  private readonly backoff = new Map<string, { retryAt: number; attempts: number; reason: string }>();
 
   async matchingServers(ctx: ExtensionContext, file: string): Promise<{ matches: MatchedServer[]; warnings: string[]; workspace: string }> {
     const loaded = await loadLspConfig(ctx);
@@ -490,37 +524,20 @@ class LspManager {
       const relFile = normalizeRelativePath(path.relative(root, file));
       if (relFile.startsWith("..") || path.isAbsolute(relFile)) continue;
       if (!isPathIncluded(relFile, server.include, server.exclude)) continue;
-      matches.push({ server, root, relFile });
+      matches.push({ server, root });
     }
 
     return { matches, warnings, workspace };
   }
 
-  private async getClient(server: LspServerConfig, root: string, file: string, workspace: string, signal?: AbortSignal): Promise<LspClient> {
+  private getClient(server: LspServerConfig, root: string): LspClient {
     const key = clientKey(server.id, root);
-    const backoff = this.backoff.get(key);
-    if (backoff && Date.now() < backoff.retryAt) {
-      throw new Error(`${server.id}: unavailable (${backoff.reason}); retry after ${new Date(backoff.retryAt).toISOString()}`);
-    }
-
     let client = this.clients.get(key);
-    if (!client || client.isUnavailable) {
-      const command = resolveCommand(server.id, server, { workspace, root, file });
-      client = new LspClient(server, root, command, this.diagnostics);
+    if (!client) {
+      client = new LspClient(server, root, this.diagnostics);
       this.clients.set(key, client);
     }
-
-    try {
-      await client.ensureStarted(signal);
-      this.backoff.delete(key);
-      return client;
-    } catch (error) {
-      const previous = this.backoff.get(key);
-      const attempts = (previous?.attempts ?? 0) + 1;
-      const delayMs = Math.min(60_000, 1_000 * 2 ** Math.min(attempts, 6));
-      this.backoff.set(key, { attempts, retryAt: Date.now() + delayMs, reason: (error as Error).message });
-      throw error;
-    }
+    return client;
   }
 
   async updateDiagnosticsForFile(ctx: ExtensionContext, file: string): Promise<string> {
@@ -530,20 +547,8 @@ class LspManager {
     const lines: string[] = [];
     for (const match of matches) {
       try {
-        const maxFileSizeBytes = match.server.maxFileSizeBytes ?? DEFAULT_MAX_FILE_SIZE_BYTES;
-        if (!(await fileSizeAllowed(file, maxFileSizeBytes))) {
-          lines.push(`⚠️ ${match.server.id}: skipped ${match.relFile}; file exceeds maxFileSizeBytes (${maxFileSizeBytes})`);
-          continue;
-        }
-
-        const text = await readTextFile(file);
-        const client = await this.getClient(match.server, match.root, file, workspace, ctx.signal);
-        const languageId = languageIdForFile(match.server, file);
-        await client.openOrChange(file, languageId, text, ctx.signal);
-        await client.didSave(file);
-        await delay(match.server.diagnosticsWaitMs ?? DEFAULT_DIAGNOSTICS_WAIT_MS, ctx.signal);
-        const entry = this.diagnostics.get(match.server.id, match.root, file);
-        lines.push(formatLspDiagnostics(match.server.id, file, entry?.diagnostics ?? [], match.root));
+        const client = this.getClient(match.server, match.root);
+        lines.push(await client.updateDiagnostics(file, match.server, workspace, ctx.signal));
       } catch (error) {
         lines.push(`⚠️ ${match.server.id}: ${(error as Error).message}`);
       }
@@ -552,15 +557,13 @@ class LspManager {
     return [formatWarnings("LSP diagnostics", warnings), joinSections("LSP diagnostics", lines)].filter(Boolean).join("\n\n");
   }
 
-  async ensureDocumentForTool(ctx: ExtensionContext, inputPath: string): Promise<{ file: string; match: MatchedServer; client: LspClient; workspace: string } | undefined> {
+  async navigate(ctx: ExtensionContext, inputPath: string, request: NavigationRequest): Promise<string> {
     const file = toAbsolutePath(inputPath, ctx.cwd);
     const { matches, workspace } = await this.matchingServers(ctx, file);
     const match = matches[0];
-    if (!match) return undefined;
-    const text = await readTextFile(file);
-    const client = await this.getClient(match.server, match.root, file, workspace, ctx.signal);
-    await client.openOrChange(file, languageIdForFile(match.server, file), text, ctx.signal);
-    return { file, match, client, workspace };
+    if (!match) return `No matching LSP server for ${inputPath}`;
+    const client = this.getClient(match.server, match.root);
+    return formatUnknownResult(await client.navigate(file, match.server, workspace, request, ctx.signal));
   }
 
   diagnosticsForPath(ctx: ExtensionContext, inputPath: string): string {
@@ -646,10 +649,7 @@ export default function piLspExtension(pi: ExtensionAPI) {
     parameters: POSITION_PARAMS,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return textToolResult("Cancelled");
-      const target = await manager.ensureDocumentForTool(ctx, params.path);
-      if (!target) return textToolResult(`No matching LSP server for ${params.path}`);
-      const result = await target.client.hover(target.file, params.line, params.character);
-      return textToolResult(formatUnknownResult(result));
+      return textToolResult(await manager.navigate(ctx, params.path, { kind: "hover", line: params.line, character: params.character }));
     },
   });
 
@@ -662,10 +662,7 @@ export default function piLspExtension(pi: ExtensionAPI) {
     parameters: POSITION_PARAMS,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return textToolResult("Cancelled");
-      const target = await manager.ensureDocumentForTool(ctx, params.path);
-      if (!target) return textToolResult(`No matching LSP server for ${params.path}`);
-      const result = await target.client.definition(target.file, params.line, params.character);
-      return textToolResult(formatUnknownResult(result));
+      return textToolResult(await manager.navigate(ctx, params.path, { kind: "definition", line: params.line, character: params.character }));
     },
   });
 
@@ -678,10 +675,7 @@ export default function piLspExtension(pi: ExtensionAPI) {
     parameters: REFERENCES_PARAMS,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return textToolResult("Cancelled");
-      const target = await manager.ensureDocumentForTool(ctx, params.path);
-      if (!target) return textToolResult(`No matching LSP server for ${params.path}`);
-      const result = await target.client.references(target.file, params.line, params.character, params.includeDeclaration ?? false);
-      return textToolResult(formatUnknownResult(result));
+      return textToolResult(await manager.navigate(ctx, params.path, { kind: "references", line: params.line, character: params.character, includeDeclaration: params.includeDeclaration ?? false }));
     },
   });
 
@@ -694,10 +688,7 @@ export default function piLspExtension(pi: ExtensionAPI) {
     parameters: Type.Object({ path: Type.String({ description: "File path" }) }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) return textToolResult("Cancelled");
-      const target = await manager.ensureDocumentForTool(ctx, params.path);
-      if (!target) return textToolResult(`No matching LSP server for ${params.path}`);
-      const result = await target.client.symbols(target.file);
-      return textToolResult(formatUnknownResult(result));
+      return textToolResult(await manager.navigate(ctx, params.path, { kind: "symbols" }));
     },
   });
 }

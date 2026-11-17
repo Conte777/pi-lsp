@@ -5,7 +5,13 @@ const log = (entry) => fs.appendFileSync(process.env.LSP_TRANSCRIPT, `${JSON.str
 log({ started: process.pid, cwd: process.cwd(), rootEnv: process.env.TEST_ROOT });
 let pending = Buffer.alloc(0);
 let initialized = false;
-if (process.env.LSP_MODE === "stubborn") process.on("SIGTERM", () => {});
+let mode = process.env.LSP_MODE;
+if (mode === "hang-once") {
+  const marker = `${process.env.LSP_TRANSCRIPT}.attempted`;
+  mode = fs.existsSync(marker) ? undefined : "hang";
+  fs.writeFileSync(marker, "attempted");
+}
+if (mode === "stubborn") process.on("SIGTERM", () => {});
 const documents = new Map();
 const send = (message) => {
   const body = JSON.stringify({ jsonrpc: "2.0", ...message });
@@ -29,7 +35,7 @@ function receive(message) {
     return;
   }
   if (method === "initialize") {
-    if (process.env.LSP_MODE === "hang") return;
+    if (mode === "hang") return;
     const reply = () => {
       initialized = true;
       send({ id, result: { capabilities: {
@@ -37,7 +43,7 @@ function receive(message) {
         hoverProvider: true, definitionProvider: true, referencesProvider: true, documentSymbolProvider: true,
       } } });
     };
-    if (process.env.LSP_MODE === "slow") setTimeout(reply, 500);
+    if (mode === "slow") setTimeout(reply, 500);
     else reply();
   } else if (method === "initialized") {
     send({ id: "settings", method: "workspace/configuration", params: { items: [{ section: "fixture" }, { section: "other" }] } });
@@ -49,11 +55,11 @@ function receive(message) {
     documents.set(params.textDocument.uri, params.contentChanges[0].text);
     publish(params.textDocument.uri, params.textDocument.version, params.contentChanges[0].text);
   } else if (method === "textDocument/hover") {
-    if (process.env.LSP_MODE === "crash") {
+    if (mode === "crash") {
       process.stderr.write("fixture crashed\n", () => process.exit(23));
       return;
     }
-    if (process.env.LSP_MODE === "error") send({ id, error: { code: -32603, message: "fixture request failed" } });
+    if (mode === "error") send({ id, error: { code: -32603, message: "fixture request failed" } });
     else send({ id, result: { contents: { kind: "markdown", value: "**fixture hover λ**" } } });
   } else if (method === "textDocument/definition") {
     send({ id, result: null });
@@ -61,7 +67,7 @@ function receive(message) {
     send({ id, result: [] });
   } else if (method === "shutdown") {
     send({ id, result: null });
-  } else if (method === "exit" && process.env.LSP_MODE !== "stubborn") process.exit(0);
+  } else if (method === "exit" && mode !== "stubborn") process.exit(0);
 }
 process.stdin.on("data", (chunk) => {
   pending = Buffer.concat([pending, chunk]);

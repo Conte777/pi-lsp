@@ -1,7 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { CommandRunResult, ResolvedCommand } from "./types";
 
 function isExecutable(filePath: string): boolean {
   try {
@@ -33,32 +31,4 @@ export function findExecutable(bin: string): string | undefined {
 
 export function isExecutableAvailable(bin: string): boolean {
   return !!findExecutable(bin);
-}
-
-export async function runCommand(
-  pi: ExtensionAPI,
-  command: ResolvedCommand,
-  signal?: AbortSignal,
-): Promise<CommandRunResult> {
-  const startedAt = Date.now();
-  const execOptions = {
-    cwd: command.cwd,
-    timeout: command.timeoutMs,
-    signal,
-    env: command.env ? { ...process.env, ...command.env } : undefined,
-  } as Parameters<ExtensionAPI["exec"]>[2] & { env?: NodeJS.ProcessEnv };
-
-  const result = await pi.exec(command.bin, command.args, execOptions);
-
-  return {
-    id: command.id,
-    bin: command.bin,
-    args: command.args,
-    cwd: command.cwd,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    code: result.code,
-    killed: result.killed,
-    durationMs: Date.now() - startedAt,
-  };
 }

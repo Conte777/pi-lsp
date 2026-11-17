@@ -15,10 +15,11 @@ There was no prior coverage. No tests are source inventories or helper replays.
 | delivers edit diagnostics and clears them after correction | Successful edit/write augments original result and publishes issues | Missing event, lost original output, stale diagnostics, duplicate opens | Wire open/change/save/version and user messages/cache; one owner for sync |
 | forwards navigation and server workspace requests over JSON-RPC | Coordinates are UTF-16 offsets, file URIs escaped, references context and settings returned | Wrong method/coordinates/config callback or dropped Unicode response | Transcript and public tool output; transport contract real semantic test cannot fully isolate |
 | ignores failed writes and unrelated tools and cancels before starting | Failed tools cannot trigger auto-analysis; pre-aborted tools do no work | Event filter removed or abort checked too late | No wire transcript, positive successful event starts same config |
-| reports missing binaries and backs off repeated startup failures | Unavailable server does not turn write into failure or tight retry loop | Missing binary escapes handler or no backoff | Warning then retry-after warning, original content retained |
-| bounds initialization and shuts down a hung server | Startup deadline and session cleanup remain bounded | Never-initializing process hangs event or survives shutdown | Measured event deadline, warning, PID disappearance |
+| reports missing binaries and backs off repeated startup failures | Unavailable server does not turn write into failure or tight retry loop; corrected config recovers | Missing binary escapes handler, no backoff, or failed client retains obsolete command | Warning then retry-after warning, original content retained, corrected config starts one process |
+| retires timed-out processes and retries initialization after backoff | Failed initialization retires its process and can recover after backoff | A rejected startup promise poisons the cached client; retire it and clear startup state | Measured deadline, immediate retry warning, second process succeeds, first PID disappears before session shutdown |
 | propagates request errors and restarts crashed subprocesses | Navigation failures are visible and subsequent calls can recover | RPC errors swallowed or dead connection reused | Tool rejection, old PID exits, next edit starts a fresh process |
 | runs semantic TypeScript diagnostics and navigation with a real server | Actual language semantics work through Pi and stdio | Fixture-only success hides interoperability/sync bugs | Real type error, fix, hover, definition, references, symbols; optional only if binary unavailable |
+| validates navigation files before starting a server | Navigation obeys maxFileSizeBytes and rejects missing files before spawning | Navigation bypasses the edit path's guard; share file preparation | Missing file and oversized file reject with no child transcript; smaller file navigates successfully |
 | concurrent navigation waits for initialization | No document request precedes initialize response | Connection is assigned before the initialization promise resolves; concurrent tool enters early | Slow independent peer rejects pre-initialization traffic; both public calls must fulfill |
 | shutdown escalates when a subprocess ignores SIGTERM | Session shutdown eventually terminates an uncooperative server | ChildProcess.killed means signal sent, not process exited; fallback never fires | Actual peer ignores exit/SIGTERM; PID must disappear after escalation deadline |
 
@@ -47,12 +48,10 @@ session should install the local package in a temporary Pi agent/workspace,
 exercise actual write/edit tool execution and observe diagnostics/custom messages,
 navigation and session shutdown. No fixture can replace that acceptance check.
 
-## Lifecycle regressions
+## Architecture changes
 
-`npm test -- tests/defects.test.ts` runs two ordinary behavioral regressions.
-Both failed on the pre-fix owner: concurrent navigation returned
-`Server not initialized`, and the SIGTERM-ignoring child survived 2600ms.
-All callers now await the shared initialization promise; shutdown checks actual
-process termination before escalating to SIGKILL after 2 seconds. The stuck
-peer's cleanup fallback runs only after the product's deadline is observed.
-Normal `npm run verify` includes these regressions without expected failures.
+The timeout/retry regression and navigation size regression failed before the
+owner changes. The missing-binary owner also checks recovery after correcting
+configuration, so a persistent lifecycle owner must use current configuration
+on its next start. All exercise registered tools/events, real files and an
+independent subprocess; no private production exports were introduced.

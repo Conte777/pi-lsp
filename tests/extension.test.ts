@@ -150,16 +150,23 @@ test("reports missing binaries and backs off repeated startup failures", async (
   expect(retry).toContain("retry after");
   expect(retry).toContain("original tool result");
   expect(await h.wire()).toEqual([]);
+  await h.globalConfig([h.fixtureServer()]);
+  await expect.poll(async () => text(await h.event("main.ts")), { timeout: 6000, interval: 250 }).toContain("no diagnostics");
+  expect((await h.wire()).filter((entry) => entry.started)).toHaveLength(1);
 });
 
-test("bounds initialization and shuts down a hung server", async () => {
-  await h.globalConfig([h.fixtureServer({ startupTimeoutMs: 150, env: { LSP_TRANSCRIPT: h.transcript, LSP_MODE: "hang" } })]);
+test("retires timed-out processes and retries initialization after backoff", async () => {
+  await h.globalConfig([h.fixtureServer({ startupTimeoutMs: 150, env: { LSP_TRANSCRIPT: h.transcript, LSP_MODE: "hang-once" } })]);
   await h.write("main.ts", "ok");
   const started = Date.now();
   expect(text(await h.event("main.ts"))).toContain("initialize timed out after 150ms");
   expect(Date.now() - started).toBeLessThan(3000);
-  expect((await h.wire()).filter((entry) => entry.started)).toHaveLength(1);
-  // afterEach verifies the observed PID exits even when initialization never replied.
+  const firstPid = (await h.wire()).find((entry) => entry.started)?.started;
+  expect(firstPid).toBeTypeOf("number");
+  expect(text(await h.event("main.ts"))).toContain("retry after");
+  await expect.poll(async () => text(await h.event("main.ts")), { timeout: 6000, interval: 250 }).toContain("no diagnostics");
+  expect((await h.wire()).filter((entry) => entry.started)).toHaveLength(2);
+  await expect.poll(() => isAlive(firstPid as number)).toBe(false);
 });
 
 test("propagates request errors and restarts crashed subprocesses", async () => {
@@ -173,4 +180,16 @@ test("propagates request errors and restarts crashed subprocesses", async () => 
   await expect.poll(async () => (await h.wire()).filter((entry) => entry.started && isAlive(entry.started)).length).toBe(0);
   expect(text(await h.event("main.ts"))).toContain("no diagnostics");
   expect((await h.wire()).filter((entry) => entry.started)).toHaveLength(3);
+});
+
+test("validates navigation files before starting a server", async () => {
+  await h.globalConfig([h.fixtureServer({ maxFileSizeBytes: 3 })]);
+  const params = { path: "main.ts", line: 0, character: 0 };
+  await expect(h.call("lsp_hover", params)).rejects.toThrow("ENOENT");
+  await h.write("main.ts", "too large");
+  await expect(h.call("lsp_hover", params)).rejects.toThrow("file exceeds maxFileSizeBytes (3)");
+  expect(await h.wire()).toEqual([]);
+  await h.write("main.ts", "ok");
+  expect(await h.call("lsp_hover", params)).toContain("fixture hover");
+  expect((await h.wire()).filter((entry) => entry.started)).toHaveLength(1);
 });

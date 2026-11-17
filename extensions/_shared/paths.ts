@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { CommandConfig, PathPlaceholders, ResolvedCommand } from "./types";
+import type { LspServerConfig, PathPlaceholders, ResolvedCommand } from "./types";
 import { applyTemplate, applyTemplateArray, applyTemplateRecord } from "./template";
 
 export function expandHome(input: string): string {
@@ -18,11 +18,6 @@ export function toAbsolutePath(inputPath: string, cwd: string): string {
 export function normalizeRelativePath(inputPath: string): string {
   const normalized = inputPath.split(path.sep).join("/");
   return normalized === "" ? "." : normalized;
-}
-
-export function isSubPathOrSame(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 export function markerExists(candidateDir: string, marker: string): boolean {
@@ -99,7 +94,7 @@ export function resolveWorkingDirectory(cwd: string | undefined, root: string, v
   return path.isAbsolute(expanded) ? path.normalize(expanded) : path.resolve(root, expanded);
 }
 
-export function resolveCommand(id: string, command: CommandConfig, options: {
+export function resolveCommand(id: string, command: LspServerConfig, options: {
   workspace: string;
   root: string;
   file: string;
@@ -123,7 +118,6 @@ export function resolveCommand(id: string, command: CommandConfig, options: {
     args: applyTemplateArray(command.args, values),
     cwd: resolveWorkingDirectory(command.cwd, options.root, values),
     env: applyTemplateRecord(command.env, values),
-    timeoutMs: command.timeoutMs,
     configPath,
     placeholders: values,
   };

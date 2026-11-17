@@ -2,16 +2,6 @@ import type { Diagnostic } from "vscode-languageserver-protocol";
 
 export type ConfigKind = "lsp";
 
-export interface CommandConfig {
-  bin: string;
-  args?: string[];
-  cwd?: string;
-  env?: Record<string, string>;
-  config?: string;
-  timeoutMs?: number;
-  diagnosticExitCodes?: number[];
-}
-
 export interface MatchableConfig {
   id: string;
   enabled?: boolean;
@@ -71,21 +61,8 @@ export interface ResolvedCommand {
   args: string[];
   cwd: string;
   env?: Record<string, string>;
-  timeoutMs?: number;
   configPath?: string;
   placeholders: PathPlaceholders;
-}
-
-export interface CommandRunResult {
-  id: string;
-  bin: string;
-  args: string[];
-  cwd: string;
-  stdout: string;
-  stderr: string;
-  code: number;
-  killed: boolean;
-  durationMs: number;
 }
 
 export interface StoredDiagnostics {
