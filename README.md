@@ -179,6 +179,8 @@ src/app.py:12:8 - error: Argument of type "str" cannot be assigned to parameter 
 
 ## Development
 
+`npm install` installs a pre-commit hook that runs lint, type checking, and tests through `npm run verify`. The hook checks files without rewriting or staging them.
+
 ```bash
 npm install
 npm run verify

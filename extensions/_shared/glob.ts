@@ -18,7 +18,7 @@ export function globToRegExp(pattern: string): RegExp {
       if (next === "*") {
         const after = normalized[i + 2];
         if (after === "/") {
-          source += "(?:.*\/)?";
+          source += "(?:.*/)?";
           i += 2;
         } else {
           source += ".*";
