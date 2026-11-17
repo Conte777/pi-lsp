@@ -4,6 +4,10 @@
   "description": "Declarative Pi extension for LSP diagnostics and language-server navigation tools.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Conte777/pi-lsp.git"
+  },
   "keywords": [
     "pi-package",
     "pi",

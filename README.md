@@ -186,3 +186,11 @@ npm install
 npm run verify
 npm pack --dry-run
 ```
+
+## Releases
+
+CI runs lint, type checking, and tests with a real language server on pushes and pull requests to `main`.
+
+To release, update the version in `package.json` and `package-lock.json`, commit it to `main`, and push a matching tag such as `v0.1.8`. The release workflow rejects tags whose commit is outside `main` or whose version differs from `package.json`. After verification, it publishes the package to npm and attaches the same archive to a GitHub Release.
+
+npm trusted publishing must authorize repository `Conte777/pi-lsp`, workflow `release.yml`, with permission to publish directly. No npm token secret is required.
