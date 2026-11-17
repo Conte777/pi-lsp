@@ -47,17 +47,12 @@ session should install the local package in a temporary Pi agent/workspace,
 exercise actual write/edit tool execution and observe diagnostics/custom messages,
 navigation and session shutdown. No fixture can replace that acceptance check.
 
-## Known defects, outside test ownership
+## Lifecycle regressions
 
-`tests/defects.test.ts` uses strict `test.fails` for two independently reproduced
-production defects. These are desired contracts that fail on the unchanged
-extension, not assertions blessing broken behavior. A future production fix must
-remove `fails`; an unexpected pass deliberately makes the suite fail. The stuck
-peer is killed by test cleanup only after the product's deadline is observed.
-
-Reproduce their actual failure output with:
-`PI_LSP_REPRODUCE_DEFECTS=1 npm test -- tests/defects.test.ts`.
-This command is expected to exit 1: one concurrent call is rejected with
-`Server not initialized`, and the SIGTERM-ignoring child is still alive after
-the 2-second escalation deadline. Normal `npm run verify` reports fourteen
-passing tests; two of those are expected failures, not fixed production bugs.
+`npm test -- tests/defects.test.ts` runs two ordinary behavioral regressions.
+Both failed on the pre-fix owner: concurrent navigation returned
+`Server not initialized`, and the SIGTERM-ignoring child survived 2600ms.
+All callers now await the shared initialization promise; shutdown checks actual
+process termination before escalating to SIGKILL after 2 seconds. The stuck
+peer's cleanup fallback runs only after the product's deadline is observed.
+Normal `npm run verify` includes these regressions without expected failures.

@@ -253,7 +253,6 @@ class LspClient {
   }
 
   async ensureStarted(signal?: AbortSignal): Promise<void> {
-    if (this.connection && !this.unavailableReason) return;
     if (this.unavailableReason) throw new Error(this.unavailableReason);
     this.startPromise ??= this.start(signal);
     await this.startPromise;
@@ -458,10 +457,10 @@ class LspClient {
 
     connection?.dispose();
 
-    if (child && !child.killed) {
+    if (child && child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
       setTimeout(() => {
-        if (!child.killed) child.kill("SIGKILL");
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       }, 2_000).unref();
     }
   }
