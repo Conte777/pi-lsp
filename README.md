@@ -4,9 +4,7 @@ Declarative Pi extension for LSP diagnostics and language-server navigation tool
 
 ## Why
 
-`pi-lsp` lets users configure language servers with JSON instead of installing a separate Pi plugin for every language.
-
-It is intentionally separate from [`pi-code-quality`](https://www.npmjs.com/package/pi-code-quality): LSP servers are long-lived JSON-RPC processes, while formatters/linters are short-lived command-line tools.
+`pi-lsp` lets users configure language servers with JSON and reuse their processes across agent turns.
 
 ## Install
 
