@@ -1,6 +1,6 @@
 {
   "name": "pi-lsp",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Declarative Pi extension for LSP diagnostics and language-server navigation tools.",
   "type": "module",
   "license": "MIT",
